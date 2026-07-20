@@ -3,5 +3,5 @@ yfinance==0.2.40
 pandas==2.0.3
 numpy==1.24.3
 scikit-learn==1.3.2
-hmmlearn --no-binary hmmlearn
+hmmlearn==0.3.2
 plotly==5.20.0
