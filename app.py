@@ -4,14 +4,7 @@ Streamlit + Plotly app that reproduces the full research pipeline
 (feature engineering -> walk-forward HMM -> regime smoothing -> backtest)
 and lets evaluators explore it interactively.
 """
-import subprocess
-import sys
 
-try:
-    import hmmlearn
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "hmmlearn==0.3.0"])
-    import hmmlearn
 
 import warnings
 warnings.filterwarnings("ignore")
