@@ -196,9 +196,15 @@ def run_walk_forward(master_key: str, master: pd.DataFrame) -> pd.DataFrame:
         chunk["regime"] = oos_regimes
         oos_results.append(chunk)
 
+# In web-app/app.py around line 199:
+
+if oos_results:
     oos_df = pd.concat(oos_results)
     oos_df = oos_df.rename(columns={"Close": "close"})
     return oos_df
+else:
+    st.error("No out-of-sample results generated. Check your data or date ranges.")
+    return pd.DataFrame()  # Return an empty DataFrame safely
 
 
 # ----------------------------------------------------------------------
