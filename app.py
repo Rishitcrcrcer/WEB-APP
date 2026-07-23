@@ -9,6 +9,8 @@ and lets evaluators explore it interactively.
 import warnings
 warnings.filterwarnings("ignore")
 
+import os
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -115,14 +117,36 @@ def ma_crossover(df, fast=20, slow=50):
     return (ma_fast - ma_slow) / ma_slow * 100
 
 
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+LOCAL_SPY_CSV = os.path.join(DATA_DIR, "spy_2005_2024.csv")
+
+
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
 def fetch_raw_data(start="2005-01-01", end="2024-12-31"):
+    # Prefer a bundled local CSV so the app doesn't depend on Yahoo Finance
+    # being reachable/un-rate-limited at runtime. Generate this file once with
+    # download_spy_data.py (see repo root) and commit it alongside app.py.
+    if os.path.exists(LOCAL_SPY_CSV):
+        try:
+            spy = pd.read_csv(LOCAL_SPY_CSV, index_col=0, parse_dates=True)
+            spy = spy[~spy.index.duplicated(keep="first")].sort_index()
+            if not spy.empty:
+                return spy, None
+        except Exception as e:
+            # Fall through to live fetch if the CSV is somehow unreadable/corrupt
+            pass
+
     try:
         spy = yf.download("SPY", start=start, end=end, progress=False, auto_adjust=False)
     except Exception as e:
         return pd.DataFrame(), str(e)
     if spy is None or spy.empty:
-        return pd.DataFrame(), "yfinance returned no rows for SPY (download may be rate-limited or blocked on this network)."
+        return pd.DataFrame(), (
+            "No local data file found at data/spy_2005_2024.csv, and the live "
+            "yfinance fallback also returned no rows (download may be rate-limited "
+            "or blocked on this network). Run download_spy_data.py somewhere with "
+            "normal internet access and commit the resulting CSV to data/."
+        )
     if isinstance(spy.columns, pd.MultiIndex):
         spy.columns = spy.columns.get_level_values(0)
     spy = spy[~spy.index.duplicated(keep="first")].sort_index()
