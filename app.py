@@ -5,7 +5,6 @@ Streamlit + Plotly app that reproduces the full research pipeline
 and lets evaluators explore it interactively.
 """
 
-
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -196,15 +195,13 @@ def run_walk_forward(master_key: str, master: pd.DataFrame) -> pd.DataFrame:
         chunk["regime"] = oos_regimes
         oos_results.append(chunk)
 
-# In web-app/app.py around line 199:
-
     if oos_results:
         oos_df = pd.concat(oos_results)
         oos_df = oos_df.rename(columns={"Close": "close"})
         return oos_df
     else:
         st.error("No out-of-sample results generated. Check your data or date ranges.")
-        return pd.DataFrame()  # Return an empty DataFrame safely
+        return pd.DataFrame()
 
 
 # ----------------------------------------------------------------------
@@ -241,6 +238,10 @@ def enforce_min_duration(regimes, min_days=15):
 
 @st.cache_data(show_spinner=False)
 def apply_dwell_filter(oos_df: pd.DataFrame, min_days: int, smooth_window: int) -> pd.DataFrame:
+    if oos_df.empty or "regime" not in oos_df.columns:
+        st.warning("Cannot apply dwell filter: input data is empty or missing the 'regime' column.")
+        return oos_df.copy()
+
     df = oos_df.copy()
     temp = smooth_regimes(df["regime"].values, window=smooth_window)
     temp = enforce_min_duration(temp, min_days=min_days)
@@ -253,6 +254,9 @@ def apply_dwell_filter(oos_df: pd.DataFrame, min_days: int, smooth_window: int) 
 # ----------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def run_backtest(oos_df: pd.DataFrame, bull_cap: float, chop_cap: float, bear_exposure: float) -> pd.DataFrame:
+    if oos_df.empty or "regime_smooth" not in oos_df.columns:
+        return oos_df.copy()
+
     df = oos_df.copy()
     df["realized_vol"] = df["log_return"].rolling(ROLLING_VOL_WINDOW, min_periods=5).std() * np.sqrt(ANNUALIZATION)
     df["realized_vol"] = df["realized_vol"].replace(0.0, np.nan).ffill().bfill()
@@ -284,19 +288,22 @@ def run_backtest(oos_df: pd.DataFrame, bull_cap: float, chop_cap: float, bear_ex
 
 
 def max_drawdown_series(cum_returns: pd.Series) -> pd.Series:
+    if cum_returns.empty:
+        return pd.Series(dtype=float)
     running_max = cum_returns.cummax()
     return (cum_returns - running_max) / running_max * 100
 
 
 def compute_metrics(daily_returns, cum_wealth):
     n_days = len(daily_returns)
-    if n_days == 0:
+    if n_days == 0 or cum_wealth.empty:
         return dict(ann_return=np.nan, ann_vol=np.nan, sharpe=np.nan, mdd=np.nan)
     ann_return = (cum_wealth.iloc[-1] ** (ANNUALIZATION / n_days)) - 1.0
     ann_vol = daily_returns.std() * np.sqrt(ANNUALIZATION)
     sharpe = ann_return / ann_vol if ann_vol else np.nan
     dd = max_drawdown_series(cum_wealth)
-    return dict(ann_return=ann_return, ann_vol=ann_vol, sharpe=sharpe, mdd=dd.min())
+    mdd = dd.min() if not dd.empty else np.nan
+    return dict(ann_return=ann_return, ann_vol=ann_vol, sharpe=sharpe, mdd=mdd)
 
 
 # ----------------------------------------------------------------------
@@ -338,6 +345,9 @@ with st.spinner("Running walk-forward HMM (first load only, then cached)..."):
 oos_df = apply_dwell_filter(oos_df, min_days=min_days, smooth_window=smooth_window)
 oos_df = run_backtest(oos_df, bull_cap=bull_cap, chop_cap=chop_cap, bear_exposure=bear_exposure)
 
+if oos_df.empty:
+    st.stop()
+
 # Date range selector, based on actual OOS index
 min_date, max_date = oos_df.index.min().date(), oos_df.index.max().date()
 date_range = st.sidebar.date_input("Date range", value=(min_date, max_date), min_value=min_date, max_value=max_date)
@@ -368,6 +378,8 @@ st.markdown("---")
 
 
 def add_regime_shading(fig, df, row=None, col=None, alpha_key="regime_smooth"):
+    if df.empty or alpha_key not in df.columns:
+        return fig
     prev_date = df.index[0]
     prev_regime = df[alpha_key].iloc[0]
     for i in range(1, len(df)):
@@ -417,7 +429,7 @@ fig2.add_trace(go.Scatter(x=view.index, y=view["strategy_cum"], mode="lines",
 fig2.add_trace(go.Scatter(x=view.index, y=view["bah_cum"], mode="lines",
                            line=dict(color="#ef5b5b", width=2), name="Buy & Hold SPY"))
 fig2.update_layout(**PLOTLY_TEMPLATE, height=460, yaxis_title="Growth of $1")
-fig1.update_layout(legend=dict(orientation="h", y=1.08))
+fig2.update_layout(legend=dict(orientation="h", y=1.08))
 st.plotly_chart(fig2, use_container_width=True)
 
 # ----------------------------------------------------------------------
@@ -433,7 +445,7 @@ fig3.add_trace(go.Scatter(x=view.index, y=strat_dd, mode="lines", fill="tozeroy"
 fig3.add_trace(go.Scatter(x=view.index, y=bah_dd, mode="lines", fill="tozeroy",
                            line=dict(color="#ef5b5b", width=1.2), fillcolor="rgba(239,91,91,0.2)", name="Buy & Hold SPY"))
 fig3.update_layout(**PLOTLY_TEMPLATE, height=420, yaxis_title="Drawdown (%)")
-fig1.update_layout(legend=dict(orientation="h", y=1.08))
+fig3.update_layout(legend=dict(orientation="h", y=1.08))
 st.plotly_chart(fig3, use_container_width=True)
 
 # ----------------------------------------------------------------------
@@ -457,7 +469,7 @@ with col_right:
                                      marker_color=REGIME_COLORS[regime], nbinsx=40))
     fig4.update_layout(**PLOTLY_TEMPLATE, height=380, barmode="overlay",
                         xaxis_title="Value", yaxis_title="Density")
-    fig1.update_layout(legend=dict(orientation="h", y=1.1))
+    fig4.update_layout(legend=dict(orientation="h", y=1.1))
     st.plotly_chart(fig4, use_container_width=True)
 
 st.subheader(f"Feature Over Time — {FEATURE_LABELS[selected_feature]}")
