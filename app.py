@@ -5,6 +5,7 @@ Streamlit + Plotly app that reproduces the full research pipeline
 and lets evaluators explore it interactively.
 """
 
+
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -114,11 +115,16 @@ def ma_crossover(df, fast=20, slow=50):
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
 def fetch_raw_data(start="2005-01-01", end="2024-12-31"):
-    spy = yf.download("SPY", start=start, end=end, progress=False, auto_adjust=False)
+    try:
+        spy = yf.download("SPY", start=start, end=end, progress=False, auto_adjust=False)
+    except Exception as e:
+        return pd.DataFrame(), str(e)
+    if spy is None or spy.empty:
+        return pd.DataFrame(), "yfinance returned no rows for SPY (download may be rate-limited or blocked on this network)."
     if isinstance(spy.columns, pd.MultiIndex):
         spy.columns = spy.columns.get_level_values(0)
     spy = spy[~spy.index.duplicated(keep="first")].sort_index()
-    return spy
+    return spy, None
 
 
 @st.cache_data(show_spinner=False)
@@ -130,6 +136,7 @@ def build_features(spy: pd.DataFrame) -> pd.DataFrame:
     df["parkinson_vol"] = parkinson_volatility(df, window=20)
     df["rsi"] = rsi(df, window=14)
     df["ma_cross"] = ma_crossover(df, fast=20, slow=50)
+    df[FEATURES] = df[FEATURES].replace([np.inf, -np.inf], np.nan)
     df = df.dropna(subset=FEATURES)
     return df
 
@@ -200,8 +207,7 @@ def run_walk_forward(master_key: str, master: pd.DataFrame) -> pd.DataFrame:
         oos_df = oos_df.rename(columns={"Close": "close"})
         return oos_df
     else:
-        st.error("No out-of-sample results generated. Check your data or date ranges.")
-        return pd.DataFrame()
+        return pd.DataFrame()  # caller checks for empty and stops with a clear message
 
 
 # ----------------------------------------------------------------------
@@ -238,10 +244,6 @@ def enforce_min_duration(regimes, min_days=15):
 
 @st.cache_data(show_spinner=False)
 def apply_dwell_filter(oos_df: pd.DataFrame, min_days: int, smooth_window: int) -> pd.DataFrame:
-    if oos_df.empty or "regime" not in oos_df.columns:
-        st.warning("Cannot apply dwell filter: input data is empty or missing the 'regime' column.")
-        return oos_df.copy()
-
     df = oos_df.copy()
     temp = smooth_regimes(df["regime"].values, window=smooth_window)
     temp = enforce_min_duration(temp, min_days=min_days)
@@ -254,9 +256,6 @@ def apply_dwell_filter(oos_df: pd.DataFrame, min_days: int, smooth_window: int) 
 # ----------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def run_backtest(oos_df: pd.DataFrame, bull_cap: float, chop_cap: float, bear_exposure: float) -> pd.DataFrame:
-    if oos_df.empty or "regime_smooth" not in oos_df.columns:
-        return oos_df.copy()
-
     df = oos_df.copy()
     df["realized_vol"] = df["log_return"].rolling(ROLLING_VOL_WINDOW, min_periods=5).std() * np.sqrt(ANNUALIZATION)
     df["realized_vol"] = df["realized_vol"].replace(0.0, np.nan).ffill().bfill()
@@ -288,22 +287,19 @@ def run_backtest(oos_df: pd.DataFrame, bull_cap: float, chop_cap: float, bear_ex
 
 
 def max_drawdown_series(cum_returns: pd.Series) -> pd.Series:
-    if cum_returns.empty:
-        return pd.Series(dtype=float)
     running_max = cum_returns.cummax()
     return (cum_returns - running_max) / running_max * 100
 
 
 def compute_metrics(daily_returns, cum_wealth):
     n_days = len(daily_returns)
-    if n_days == 0 or cum_wealth.empty:
+    if n_days == 0:
         return dict(ann_return=np.nan, ann_vol=np.nan, sharpe=np.nan, mdd=np.nan)
     ann_return = (cum_wealth.iloc[-1] ** (ANNUALIZATION / n_days)) - 1.0
     ann_vol = daily_returns.std() * np.sqrt(ANNUALIZATION)
     sharpe = ann_return / ann_vol if ann_vol else np.nan
     dd = max_drawdown_series(cum_wealth)
-    mdd = dd.min() if not dd.empty else np.nan
-    return dict(ann_return=ann_return, ann_vol=ann_vol, sharpe=sharpe, mdd=mdd)
+    return dict(ann_return=ann_return, ann_vol=ann_vol, sharpe=sharpe, mdd=dd.min())
 
 
 # ----------------------------------------------------------------------
@@ -336,17 +332,35 @@ st.title("📈 HMM Market Regime Dashboard")
 st.caption("Walk-forward Hidden Markov Model regime detection on SPY (2005–2024), with dwell-time smoothing and a regime-aware trading overlay.")
 
 with st.spinner("Loading market data..."):
-    raw = fetch_raw_data()
-    feat_df = build_features(raw)
+    raw, fetch_err = fetch_raw_data()
+
+if fetch_err or raw.empty:
+    st.error(
+        f"Could not load SPY price data from Yahoo Finance: {fetch_err or 'no rows returned'}. "
+        "This usually means the download was rate-limited or the network/egress settings are "
+        "blocking access to finance.yahoo.com. Fix network access (or try again later) and reload."
+    )
+    st.stop()
+
+feat_df = build_features(raw)
+
+if feat_df.empty or len(feat_df) <= TRAIN_WINDOW:
+    st.error(
+        f"Only {len(feat_df)} rows of usable feature data are available, but the walk-forward "
+        f"model needs at least {TRAIN_WINDOW} (TRAIN_WINDOW) rows before it can produce any "
+        "out-of-sample predictions. Widen the date range in fetch_raw_data() or reduce TRAIN_WINDOW."
+    )
+    st.stop()
 
 with st.spinner("Running walk-forward HMM (first load only, then cached)..."):
     oos_df = run_walk_forward("spy_2005_2024_v1", feat_df)
 
+if oos_df.empty:
+    st.error("The walk-forward HMM produced no out-of-sample results. Check the data and date ranges above.")
+    st.stop()
+
 oos_df = apply_dwell_filter(oos_df, min_days=min_days, smooth_window=smooth_window)
 oos_df = run_backtest(oos_df, bull_cap=bull_cap, chop_cap=chop_cap, bear_exposure=bear_exposure)
-
-if oos_df.empty:
-    st.stop()
 
 # Date range selector, based on actual OOS index
 min_date, max_date = oos_df.index.min().date(), oos_df.index.max().date()
@@ -378,8 +392,6 @@ st.markdown("---")
 
 
 def add_regime_shading(fig, df, row=None, col=None, alpha_key="regime_smooth"):
-    if df.empty or alpha_key not in df.columns:
-        return fig
     prev_date = df.index[0]
     prev_regime = df[alpha_key].iloc[0]
     for i in range(1, len(df)):
@@ -416,7 +428,7 @@ for date_str, label in events.items():
 
 fig1.update_layout(**PLOTLY_TEMPLATE, height=460, yaxis_title="SPY Price (USD)")
 fig1.update_layout(legend=dict(orientation="h", y=1.08))
-st.plotly_chart(fig1, use_container_width=True)
+st.plotly_chart(fig1, width='stretch')
 
 # ----------------------------------------------------------------------
 # Chart 2: Cumulative Returns
@@ -430,7 +442,7 @@ fig2.add_trace(go.Scatter(x=view.index, y=view["bah_cum"], mode="lines",
                            line=dict(color="#ef5b5b", width=2), name="Buy & Hold SPY"))
 fig2.update_layout(**PLOTLY_TEMPLATE, height=460, yaxis_title="Growth of $1")
 fig2.update_layout(legend=dict(orientation="h", y=1.08))
-st.plotly_chart(fig2, use_container_width=True)
+st.plotly_chart(fig2, width='stretch')
 
 # ----------------------------------------------------------------------
 # Chart 3: Drawdown Comparison
@@ -446,7 +458,7 @@ fig3.add_trace(go.Scatter(x=view.index, y=bah_dd, mode="lines", fill="tozeroy",
                            line=dict(color="#ef5b5b", width=1.2), fillcolor="rgba(239,91,91,0.2)", name="Buy & Hold SPY"))
 fig3.update_layout(**PLOTLY_TEMPLATE, height=420, yaxis_title="Drawdown (%)")
 fig3.update_layout(legend=dict(orientation="h", y=1.08))
-st.plotly_chart(fig3, use_container_width=True)
+st.plotly_chart(fig3, width='stretch')
 
 # ----------------------------------------------------------------------
 # Chart 4 & 5: Feature Distribution + Feature Over Time (feature picker)
@@ -470,7 +482,7 @@ with col_right:
     fig4.update_layout(**PLOTLY_TEMPLATE, height=380, barmode="overlay",
                         xaxis_title="Value", yaxis_title="Density")
     fig4.update_layout(legend=dict(orientation="h", y=1.1))
-    st.plotly_chart(fig4, use_container_width=True)
+    st.plotly_chart(fig4, width='stretch')
 
 st.subheader(f"Feature Over Time — {FEATURE_LABELS[selected_feature]}")
 fig5 = go.Figure()
@@ -480,7 +492,7 @@ fig5.add_trace(go.Scatter(x=view.index, y=view[selected_feature], mode="lines",
 fig5.add_hline(y=0, line=dict(color=MUTED, dash="dot", width=1))
 fig5.update_layout(**PLOTLY_TEMPLATE, height=380, yaxis_title=FEATURE_LABELS[selected_feature],
                     showlegend=False)
-st.plotly_chart(fig5, use_container_width=True)
+st.plotly_chart(fig5, width='stretch')
 
 # ----------------------------------------------------------------------
 # Chart 6: Transition Heatmap
@@ -505,7 +517,7 @@ fig6 = go.Figure(data=go.Heatmap(
 ))
 fig6.update_layout(**PLOTLY_TEMPLATE, height=420, xaxis_title="To Regime", yaxis_title="From Regime")
 fig6.update_yaxes(autorange="reversed")
-st.plotly_chart(fig6, use_container_width=True)
+st.plotly_chart(fig6, width='stretch')
 st.caption("Diagonal = regime persistence. High diagonal values mean stable regimes; low values mean frequent switching.")
 
 st.markdown("---")
