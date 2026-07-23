@@ -395,8 +395,8 @@ for date_str, label in events.items():
         fig1.add_annotation(x=d, y=1.02, yref="paper", text=label, showarrow=False,
                              font=dict(color="#cc4444", size=10))
 
-fig1.update_layout(**PLOTLY_TEMPLATE, height=460, yaxis_title="SPY Price (USD)",
-                    legend=dict(orientation="h", y=1.08))
+fig1_layout = {**PLOTLY_TEMPLATE, "legend": dict(orientation="h", y=1.08)}
+fig1.update_layout(**fig1_layout, height=460, yaxis_title="SPY Price (USD)")
 st.plotly_chart(fig1, use_container_width=True)
 
 # ----------------------------------------------------------------------
@@ -409,8 +409,8 @@ fig2.add_trace(go.Scatter(x=view.index, y=view["strategy_cum"], mode="lines",
                            line=dict(color=ACCENT, width=2), name="HMM Strategy"))
 fig2.add_trace(go.Scatter(x=view.index, y=view["bah_cum"], mode="lines",
                            line=dict(color="#ef5b5b", width=2), name="Buy & Hold SPY"))
-fig2.update_layout(**PLOTLY_TEMPLATE, height=460, yaxis_title="Growth of $1",
-                    legend=dict(orientation="h", y=1.08))
+fig2_layout = {**PLOTLY_TEMPLATE, "legend": dict(orientation="h", y=1.08)}
+fig2.update_layout(**fig2_layout, height=460, yaxis_title="Growth of $1")
 st.plotly_chart(fig2, use_container_width=True)
 
 # ----------------------------------------------------------------------
@@ -425,8 +425,8 @@ fig3.add_trace(go.Scatter(x=view.index, y=strat_dd, mode="lines", fill="tozeroy"
                            line=dict(color=ACCENT, width=1.2), fillcolor="rgba(79,209,197,0.25)", name="HMM Strategy"))
 fig3.add_trace(go.Scatter(x=view.index, y=bah_dd, mode="lines", fill="tozeroy",
                            line=dict(color="#ef5b5b", width=1.2), fillcolor="rgba(239,91,91,0.2)", name="Buy & Hold SPY"))
-fig3.update_layout(**PLOTLY_TEMPLATE, height=420, yaxis_title="Drawdown (%)",
-                    legend=dict(orientation="h", y=1.08))
+fig3_layout = {**PLOTLY_TEMPLATE, "legend": dict(orientation="h", y=1.08)}
+fig3.update_layout(**fig3_layout, height=420, yaxis_title="Drawdown (%)")
 st.plotly_chart(fig3, use_container_width=True)
 
 # ----------------------------------------------------------------------
@@ -448,9 +448,9 @@ with col_right:
         data = data.clip(lo, hi)
         fig4.add_trace(go.Histogram(x=data, name=regime, opacity=0.55, histnorm="probability density",
                                      marker_color=REGIME_COLORS[regime], nbinsx=40))
-    fig4.update_layout(**PLOTLY_TEMPLATE, height=380, barmode="overlay",
-                        xaxis_title="Value", yaxis_title="Density",
-                        legend=dict(orientation="h", y=1.1))
+    fig4_layout = {**PLOTLY_TEMPLATE, "legend": dict(orientation="h", y=1.1)}
+    fig4.update_layout(**fig4_layout, height=380, barmode="overlay",
+                        xaxis_title="Value", yaxis_title="Density")
     st.plotly_chart(fig4, use_container_width=True)
 
 st.subheader(f"Feature Over Time — {FEATURE_LABELS[selected_feature]}")
