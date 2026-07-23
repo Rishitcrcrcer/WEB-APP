@@ -121,18 +121,69 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 LOCAL_SPY_CSV = os.path.join(DATA_DIR, "spy_2005_2024.csv")
 
 
+def _load_local_spy_csv(path: str) -> pd.DataFrame:
+    """Loads a locally saved SPY OHLCV file. Handles two common export formats:
+
+    1. Plain single-header CSV:
+       Date,Open,High,Low,Close,Adj Close,Volume
+       2005-01-03,...
+
+    2. yfinance's raw multi-header export (what you get from df.to_csv() on a
+       yf.download() result), which has 3 header rows before the data starts:
+       Price,Close,High,Low,Open,Volume
+       Ticker,SPY,SPY,SPY,SPY,SPY
+       Date,,,,,
+       2005-01-03,81.17...,...
+    """
+    with open(path, "r", encoding="utf-8-sig") as f:  # utf-8-sig strips a BOM if present
+        first_lines = [f.readline() for _ in range(3)]
+
+    # Loose detection: look for "ticker" as a whole token on line 2, not a strict
+    # prefix match, so quoting/BOM/whitespace differences don't break detection.
+    line2_tokens = [t.strip().strip('"').strip("'").lower() for t in first_lines[1].split(",")]
+    line3_tokens = [t.strip().strip('"').strip("'").lower() for t in first_lines[2].split(",")]
+    is_yfinance_multiheader = (line2_tokens[:1] == ["ticker"]) and (line3_tokens[:1] == ["date"])
+
+    if is_yfinance_multiheader:
+        # Row 0 = real column names, rows 1-2 = Ticker/Date label rows to skip,
+        # first column = the actual date index.
+        spy = pd.read_csv(path, skiprows=[1, 2], index_col=0, parse_dates=True, encoding="utf-8-sig")
+        spy.index.name = "Date"
+    else:
+        spy = pd.read_csv(path, index_col=0, parse_dates=True, encoding="utf-8-sig")
+
+    # Belt-and-suspenders: whatever branch ran above, force every OHLCV column to
+    # be actually numeric. If any stray non-numeric header/label rows slipped
+    # through detection, this coerces them to NaN so they get dropped below,
+    # instead of silently poisoning the whole column into string dtype.
+    numeric_cols = [c for c in ["Open", "High", "Low", "Close", "Adj Close", "Volume"] if c in spy.columns]
+    for col in numeric_cols:
+        spy[col] = pd.to_numeric(spy[col], errors="coerce")
+
+    spy.index = pd.to_datetime(spy.index, errors="coerce")
+    spy = spy[spy.index.notna()]
+    spy = spy.dropna(subset=[c for c in ["Open", "High", "Low", "Close"] if c in spy.columns], how="any")
+
+    # Normalize column names/casing in case of stray whitespace etc.
+    spy.columns = [str(c).strip() for c in spy.columns]
+    return spy
+
+
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
 def fetch_raw_data(start="2005-01-01", end="2024-12-31"):
     # Prefer a bundled local CSV so the app doesn't depend on Yahoo Finance
-    # being reachable/un-rate-limited at runtime. Generate this file once with
-    # download_spy_data.py (see repo root) and commit it alongside app.py.
+    # being reachable/un-rate-limited at runtime. Just drop your downloaded
+    # file at data/spy_2005_2024.csv - both plain and yfinance-export formats work.
     if os.path.exists(LOCAL_SPY_CSV):
         try:
-            spy = pd.read_csv(LOCAL_SPY_CSV, index_col=0, parse_dates=True)
-            spy = spy[~spy.index.duplicated(keep="first")].sort_index()
-            if not spy.empty:
-                return spy, None
-        except Exception as e:
+            spy = _load_local_spy_csv(LOCAL_SPY_CSV)
+            required_cols = {"Open", "High", "Low", "Close", "Volume"}
+            if required_cols.issubset(spy.columns):
+                spy = spy[~spy.index.duplicated(keep="first")].sort_index()
+                spy = spy.dropna(how="all")
+                if not spy.empty:
+                    return spy, None
+        except Exception:
             # Fall through to live fetch if the CSV is somehow unreadable/corrupt
             pass
 
@@ -142,15 +193,16 @@ def fetch_raw_data(start="2005-01-01", end="2024-12-31"):
         return pd.DataFrame(), str(e)
     if spy is None or spy.empty:
         return pd.DataFrame(), (
-            "No local data file found at data/spy_2005_2024.csv, and the live "
+            "No usable local data file found at data/spy_2005_2024.csv, and the live "
             "yfinance fallback also returned no rows (download may be rate-limited "
-            "or blocked on this network). Run download_spy_data.py somewhere with "
-            "normal internet access and commit the resulting CSV to data/."
+            "or blocked on this network). Download SPY data somewhere with normal "
+            "internet access and commit the resulting CSV to data/."
         )
     if isinstance(spy.columns, pd.MultiIndex):
         spy.columns = spy.columns.get_level_values(0)
     spy = spy[~spy.index.duplicated(keep="first")].sort_index()
     return spy, None
+
 
 
 @st.cache_data(show_spinner=False)
