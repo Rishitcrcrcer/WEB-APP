@@ -670,3 +670,4 @@ st.caption(
     f"Showing {len(view):,} out-of-sample trading days from {view.index.min().date()} to {view.index.max().date()} · "
     f"Regime smoothing: {min_days}-day minimum dwell · Walk-forward window {TRAIN_WINDOW}d / step {STEP_SIZE}d"
 )
+
