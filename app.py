@@ -15,6 +15,8 @@ import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import yfinance as yf
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from sklearn.preprocessing import StandardScaler
 from hmmlearn.hmm import GaussianHMM
 
@@ -84,7 +86,7 @@ N_ITER = 200
 COVARIANCE_TYPE = "diag"
 RANDOM_STATE = 42
 
-TARGET_VOL = 0.15
+TARGET_VOL = 0.30
 ROLLING_VOL_WINDOW = 20
 ANNUALIZATION = 252
 TRANS_COST_BPS = 0.0002
@@ -294,12 +296,14 @@ def max_drawdown_series(cum_returns: pd.Series) -> pd.Series:
 def compute_metrics(daily_returns, cum_wealth):
     n_days = len(daily_returns)
     if n_days == 0:
-        return dict(ann_return=np.nan, ann_vol=np.nan, sharpe=np.nan, mdd=np.nan)
+        return dict(ann_return=np.nan, ann_vol=np.nan, sharpe=np.nan, mdd=np.nan, calmar=np.nan)
     ann_return = (cum_wealth.iloc[-1] ** (ANNUALIZATION / n_days)) - 1.0
     ann_vol = daily_returns.std() * np.sqrt(ANNUALIZATION)
     sharpe = ann_return / ann_vol if ann_vol else np.nan
     dd = max_drawdown_series(cum_wealth)
-    return dict(ann_return=ann_return, ann_vol=ann_vol, sharpe=sharpe, mdd=dd.min())
+    mdd = dd.min()
+    calmar = ann_return / abs(mdd / 100) if mdd else np.nan
+    return dict(ann_return=ann_return, ann_vol=ann_vol, sharpe=sharpe, mdd=mdd, calmar=calmar)
 
 
 # ----------------------------------------------------------------------
@@ -315,9 +319,9 @@ smooth_window = st.sidebar.slider("Smoothing window (days)", 5, 80, 20, step=5)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Strategy exposure caps**")
-bull_cap = st.sidebar.slider("Bull cap", 0.0, 3.0, 2.0, step=0.1)
-chop_cap = st.sidebar.slider("Chop cap", 0.0, 3.0, 1.5, step=0.1)
-bear_exposure = st.sidebar.slider("Bear exposure", 0.0, 1.0, 0.6, step=0.1)
+bull_cap = st.sidebar.slider("Bull cap", 0.0, 5.0, 3.5, step=0.1)
+chop_cap = st.sidebar.slider("Chop cap", 0.0, 5.0, 2.2, step=0.1)
+bear_exposure = st.sidebar.slider("Bear exposure", -1.0, 1.0, 0.0, step=0.1)
 
 st.sidebar.markdown("---")
 show_regimes = st.sidebar.multiselect("Regimes to shade", ["Bull", "Chop", "Bear"], default=["Bull", "Chop", "Bear"])
@@ -434,15 +438,80 @@ st.plotly_chart(fig1, width='stretch')
 # Chart 2: Cumulative Returns
 # ----------------------------------------------------------------------
 st.subheader("Cumulative Returns: HMM Strategy vs Buy & Hold")
-fig2 = go.Figure()
-add_regime_shading(fig2, view)
-fig2.add_trace(go.Scatter(x=view.index, y=view["strategy_cum"], mode="lines",
-                           line=dict(color=ACCENT, width=2), name="HMM Strategy"))
-fig2.add_trace(go.Scatter(x=view.index, y=view["bah_cum"], mode="lines",
-                           line=dict(color="#ef5b5b", width=2), name="Buy & Hold SPY"))
-fig2.update_layout(**PLOTLY_TEMPLATE, height=460, yaxis_title="Growth of $1")
-fig2.update_layout(legend=dict(orientation="h", y=1.08))
-st.plotly_chart(fig2, width='stretch')
+
+fig2, ax2 = plt.subplots(figsize=(16, 7))
+
+# plot both curves
+ax2.plot(view.index, view["strategy_cum"],
+         color="#e74c3c", linewidth=2, label="Aggressive HMM Strategy", zorder=3)
+ax2.plot(view.index, view["bah_cum"],
+         color="#2c3e50", linewidth=2, label="Buy & Hold SPY", zorder=3)
+
+# regime background (uses the same date-filtered `view` as every other chart,
+# so it always matches whatever range/sliders are currently selected)
+regime_colors_mpl = {"Bull": "#90EE90", "Chop": "#FFD700", "Bear": "#FF6B6B"}
+prev_date = view.index[0]
+prev_regime = view["regime_smooth"].iloc[0]
+for i in range(1, len(view)):
+    current_regime = view["regime_smooth"].iloc[i]
+    current_date = view.index[i]
+    if current_regime != prev_regime or i == len(view) - 1:
+        if prev_regime in show_regimes:
+            ax2.axvspan(prev_date, current_date, alpha=0.15,
+                        color=regime_colors_mpl[prev_regime], zorder=1)
+        prev_date = current_date
+        prev_regime = current_regime
+
+# final value annotations
+final_strategy = view["strategy_cum"].dropna().iloc[-1]
+final_bah = view["bah_cum"].dropna().iloc[-1]
+
+ax2.annotate(f"Aggressive: {final_strategy:.2f}x\n({(final_strategy-1)*100:.0f}%)",
+             xy=(view.index[-1], final_strategy),
+             xytext=(-100, 10), textcoords="offset points",
+             fontsize=11, fontweight="bold", color="#e74c3c",
+             arrowprops=dict(arrowstyle="->", color="#e74c3c", lw=1.5))
+
+ax2.annotate(f"Buy & Hold: {final_bah:.2f}x\n({(final_bah-1)*100:.0f}%)",
+             xy=(view.index[-1], final_bah),
+             xytext=(-100, -40), textcoords="offset points",
+             fontsize=11, fontweight="bold", color="#2c3e50",
+             arrowprops=dict(arrowstyle="->", color="#2c3e50", lw=1.5))
+
+# key events
+event_labels = {"2020-03-23": "COVID\nCrash", "2022-01-03": "2022\nBear"}
+for date_str, label in event_labels.items():
+    d = pd.Timestamp(date_str)
+    if view.index.min() <= d <= view.index.max():
+        ax2.axvline(x=d, color="gray", linestyle="--", linewidth=1, alpha=0.7)
+        ax2.text(d, view["strategy_cum"].max() * 0.95, label,
+                  fontsize=9, color="gray", ha="center", style="italic")
+
+# performance box (reuses strat_m, already computed above for the metrics row)
+textstr = (
+    f"Aggressive Strategy\n"
+    f"Total Return: {(final_strategy - 1) * 100:.2f}%\n"
+    f"Sharpe Ratio: {strat_m['sharpe']:.2f}\n"
+    f"Max Drawdown: {strat_m['mdd']:.2f}%\n"
+    f"Calmar Ratio: {strat_m['calmar']:.2f}"
+)
+props = dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="#e74c3c")
+ax2.text(0.02, 0.97, textstr, transform=ax2.transAxes, fontsize=10,
+          verticalalignment="top", bbox=props, color="#e74c3c")
+
+# formatting
+ax2.set_title("Aggressive HMM Strategy vs Buy & Hold SPY", fontsize=15, fontweight="bold", pad=15)
+ax2.set_xlabel("Date", fontsize=12)
+ax2.set_ylabel("Cumulative Return (1.0 = Starting Value)", fontsize=12)
+ax2.legend(fontsize=12, loc="upper left", framealpha=0.9)
+ax2.grid(True, alpha=0.3, linestyle="--")
+ax2.set_facecolor("#f8f9fa")
+fig2.patch.set_facecolor("white")
+fig2.tight_layout()
+
+st.pyplot(fig2)
+plt.close(fig2)  # free the figure each rerun so memory doesn't build up across sessions
+
 
 # ----------------------------------------------------------------------
 # Chart 3: Drawdown Comparison
