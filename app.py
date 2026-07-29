@@ -126,24 +126,31 @@ def label_regimes(model):
     return {int(s[0]): "Bear", int(s[1]): "Chop", int(s[-1]): "Bull"}
 
 @st.cache_data(show_spinner=False)
-def run_backtest(oos_df, bull_cap, chop_cap, bear_exposure):
-    df = oos_df.copy()
-    # Fixed position sizing — no volatility targeting
-    def size(row):
-        r = row["regime_smooth"]
-        if r == "Bull":  return bull_cap
-        if r == "Chop":  return chop_cap
-        return bear_exposure  # Bear
-    df["raw_position"]       = df.apply(size, axis=1)
-    df["position"]           = df["raw_position"].shift(1).fillna(0)
-    df["strategy_gross_ret"] = df["position"] * df["log_return"]
-    df["turnover"]           = df["position"].diff().abs().fillna(0)
-    df["trans_cost"]         = TRANS_COST_BPS * df["turnover"]
-    df["strategy_net_ret"]   = df["strategy_gross_ret"] - df["trans_cost"]
-    df["bah_ret"]            = df["log_return"]
-    df["strategy_cum"]       = (1 + df["strategy_net_ret"]).cumprod()
-    df["bah_cum"]            = (1 + df["bah_ret"]).cumprod()
-    return df
+def run_walk_forward(cache_key, master):
+    n  = len(master)
+    fa = master[FEATURES].values
+    oos_results = []
+    for step in range((n - TRAIN_WINDOW) // STEP_SIZE):
+        te  = TRAIN_WINDOW + step * STEP_SIZE
+        oe  = min(te + STEP_SIZE, n)
+        if oe <= te: break
+        td, od = fa[:te], fa[te:oe]
+        lo, hi = np.percentile(td, 1, axis=0), np.percentile(td, 99, axis=0)
+        sc = StandardScaler()
+        ts = sc.fit_transform(np.clip(td, lo, hi))
+        os_ = sc.transform(np.clip(od, lo, hi))
+        try:
+            m = GaussianHMM(n_components=N_STATES, covariance_type=COV_TYPE, n_iter=N_ITER, random_state=RANDOM_STATE, verbose=False)
+            m.fit(ts)
+            states = m.predict(os_)
+        except Exception:
+            continue
+        rm = label_regimes(m)
+        chunk = master.iloc[te:oe][FEATURES + ["Close"]].copy()
+        chunk["state"]  = states
+        chunk["regime"] = [rm[s] for s in states]
+        oos_results.append(chunk)
+    return pd.concat(oos_results).rename(columns={"Close": "close"})
 
 def smooth_regimes(regimes, window=20):
     regimes = np.asarray(regimes)
@@ -176,31 +183,26 @@ def apply_dwell_filter(oos_df, min_days, smooth_window):
     return df
 
 @st.cache_data(show_spinner=False)
-def run_walk_forward(cache_key, master):
-    n  = len(master)
-    fa = master[FEATURES].values
-    oos_results = []
-    for step in range((n - TRAIN_WINDOW) // STEP_SIZE):
-        te  = TRAIN_WINDOW + step * STEP_SIZE
-        oe  = min(te + STEP_SIZE, n)
-        if oe <= te: break
-        td, od = fa[:te], fa[te:oe]
-        lo, hi = np.percentile(td, 1, axis=0), np.percentile(td, 99, axis=0)
-        sc = StandardScaler()
-        ts = sc.fit_transform(np.clip(td, lo, hi))
-        os_ = sc.transform(np.clip(od, lo, hi))
-        try:
-            m = GaussianHMM(n_components=N_STATES, covariance_type=COV_TYPE, n_iter=N_ITER, random_state=RANDOM_STATE, verbose=False)
-            m.fit(ts)
-            states = m.predict(os_)
-        except Exception:
-            continue
-        rm = label_regimes(m)
-        chunk = master.iloc[te:oe][FEATURES + ["Close"]].copy()
-        chunk["state"]  = states
-        chunk["regime"] = [rm[s] for s in states]
-        oos_results.append(chunk)
-    return pd.concat(oos_results).rename(columns={"Close": "close"})
+def run_backtest(oos_df, bull_cap, chop_cap, bear_exposure):
+    df = oos_df.copy()
+    df["realized_vol"]  = df["log_return"].rolling(VOL_WINDOW, min_periods=5).std() * np.sqrt(ANNUALIZATION)
+    df["realized_vol"]  = df["realized_vol"].replace(0, np.nan).ffill().bfill()
+    df["base_exposure"] = TARGET_VOL / df["realized_vol"]
+    caps = {"Bull": bull_cap, "Chop": chop_cap}
+    def size(row):
+        b, r = row["base_exposure"], row["regime_smooth"]
+        if pd.isna(b): return 0.0
+        return float(np.clip(b, 0, caps[r])) if r in caps else bear_exposure
+    df["raw_position"]       = df.apply(size, axis=1)
+    df["position"]           = df["raw_position"].shift(1).fillna(0)
+    df["strategy_gross_ret"] = df["position"] * df["log_return"]
+    df["turnover"]           = df["position"].diff().abs().fillna(0)
+    df["trans_cost"]         = TRANS_COST_BPS * df["turnover"]
+    df["strategy_net_ret"]   = df["strategy_gross_ret"] - df["trans_cost"]
+    df["bah_ret"]            = df["log_return"]
+    df["strategy_cum"]       = (1 + df["strategy_net_ret"]).cumprod()
+    df["bah_cum"]            = (1 + df["bah_ret"]).cumprod()
+    return df
 
 def dd_series(cum): return (cum - cum.cummax()) / cum.cummax() * 100
 
