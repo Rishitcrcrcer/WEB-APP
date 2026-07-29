@@ -185,14 +185,12 @@ def apply_dwell_filter(oos_df, min_days, smooth_window):
 @st.cache_data(show_spinner=False)
 def run_backtest(oos_df, bull_cap, chop_cap, bear_exposure):
     df = oos_df.copy()
-    df["realized_vol"]  = df["log_return"].rolling(VOL_WINDOW, min_periods=5).std() * np.sqrt(ANNUALIZATION)
-    df["realized_vol"]  = df["realized_vol"].replace(0, np.nan).ffill().bfill()
-    df["base_exposure"] = TARGET_VOL / df["realized_vol"]
-    caps = {"Bull": bull_cap, "Chop": chop_cap}
+    # Fixed position sizing — no volatility targeting
     def size(row):
-        b, r = row["base_exposure"], row["regime_smooth"]
-        if pd.isna(b): return 0.0
-        return float(np.clip(b, 0, caps[r])) if r in caps else bear_exposure
+        r = row["regime_smooth"]
+        if r == "Bull":  return bull_cap
+        if r == "Chop":  return chop_cap
+        return bear_exposure  # Bear
     df["raw_position"]       = df.apply(size, axis=1)
     df["position"]           = df["raw_position"].shift(1).fillna(0)
     df["strategy_gross_ret"] = df["position"] * df["log_return"]
