@@ -135,9 +135,15 @@ def apply_layout(fig, **kwargs):
 def load_spy_csv():
     """Load SPY OOS results from pre-saved CSV. Single source of truth."""
     try:
-        df = pd.read_csv("hmm_oos_results_SPY.csv", index_col=0, parse_dates=True)
-        df.index = pd.to_datetime(df.index)
-        df.columns = [c.lower().strip() for c in df.columns]  # normalise to lowercase
+        # Read without index_col first to handle non-standard index names like 'Price'
+        df = pd.read_csv("hmm_oos_results_SPY.csv")
+        # First column is always the date index regardless of its name
+        df = df.rename(columns={df.columns[0]: "Date"})
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.set_index("Date")
+        df.index.name = "Date"
+        # Normalise all column names to lowercase
+        df.columns = [c.lower().strip() for c in df.columns]
         df = df.sort_index()
         return df
     except FileNotFoundError:
@@ -149,9 +155,12 @@ def load_cross_asset_data():
     dfs = {}
     for asset, file in CROSS_ASSET_FILES.items():
         try:
-            df = pd.read_csv(file, index_col=0, parse_dates=True)
-            df.index = pd.to_datetime(df.index)
-            df.columns = [c.lower().strip() for c in df.columns]  # normalise to lowercase
+            df = pd.read_csv(file)
+            df = df.rename(columns={df.columns[0]: "Date"})
+            df["Date"] = pd.to_datetime(df["Date"])
+            df = df.set_index("Date")
+            df.index.name = "Date"
+            df.columns = [c.lower().strip() for c in df.columns]
             df = df.sort_index()
             df["drawdown"]     = (df["strategy_cum"] / df["strategy_cum"].cummax()) - 1
             df["bah_drawdown"] = (df["bah_cum"] / df["bah_cum"].cummax()) - 1
